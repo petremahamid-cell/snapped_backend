@@ -1,0 +1,33 @@
+version: '3'
+
+services:
+  api:
+    build: .
+    ports:
+      - "12000:12000"
+    volumes:
+      - ./app:/app/app
+      - ./uploads:/app/app/static/uploads
+    environment:
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
+      - DATABASE_URL=sqlite:///./app.db
+      - MAX_SIMILAR_PRODUCTS=30
+      - HOST=0.0.0.0
+      - PORT=12000
+      - REDIS_ENABLED=true
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+  
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped
+
+volumes:
+  redis-data:

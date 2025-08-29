@@ -1,0 +1,33 @@
+# Core dependencies - compatible with Python 3.13.2
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+httpx==0.26.0
+pillow==11.2.1
+python-dotenv==1.0.1
+
+# Database - using SQLAlchemy 1.4 for Python 3.13 compatibility
+sqlalchemy==1.4.50
+aiofiles==23.2.1
+alembic==1.13.1
+
+# Pydantic (older version without Rust dependencies)
+pydantic==2.11.7
+
+# Production
+waitress==2.1.2
+
+# For image processing
+numpy==1.26.4
+cloudinary==1.36.0
+
+# For testing
+pytest==8.0.0
+pytest-asyncio==0.23.5
+
+# Redis for production caching
+redis==5.0.1
+
+# Production optimizations
+gunicorn==21.2.0
+psycopg2-binary==2.9.10
