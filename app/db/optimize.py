@@ -1,90 +1,130 @@
-from sqlalchemy import create_engine, text
+# app/db/optimize.py
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from app.core.config import settings
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
+def _is_sqlite(engine) -> bool:
+    return engine.dialect.name == "sqlite"
+
+def _table_exists(engine, table_name: str) -> bool:
+    try:
+        return inspect(engine).has_table(table_name)
+    except Exception:
+        # Fallback for SQLite if inspector has issues
+        if _is_sqlite(engine):
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
+                    {"n": table_name},
+                ).fetchone()
+                return row is not None
+        return False
+
+def _safe_exec(conn, sql: str) -> None:
+    try:
+        conn.execute(text(sql))
+    except (OperationalError, ProgrammingError) as e:
+        logger.debug("Skipping/ignoring statement due to error: %s | SQL: %s", e, sql)
+
 def optimize_database():
     """
-    Optimize the SQLite database for better performance
+    Optimize the database safely:
+      - For SQLite: apply useful PRAGMAs (non-fatal if not supported) and create indexes.
+      - Create indexes only if their tables already exist.
+      - Never fail the app if an index/table is missing.
     """
+    # Prefer env var override if present
+    db_url = os.getenv("DATABASE_URL", settings.DATABASE_URL)
+
     engine = create_engine(
-        settings.DATABASE_URL, 
-        connect_args={
-            "check_same_thread": False,
-            "timeout": 30  # 30 second timeout for database operations
-        },
-        pool_pre_ping=True,  # Verify connections before use
-        pool_recycle=3600,   # Recycle connections every hour
-        echo=False  # Set to True for SQL debugging
+        db_url,
+        connect_args=(
+            {"check_same_thread": False, "timeout": 30}
+            if db_url.startswith("sqlite")
+            else {}
+        ),
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        echo=False,
+        future=True,
     )
-    
-    with engine.connect() as conn:
-        # Enable WAL mode for better concurrency
-        conn.execute(text("PRAGMA journal_mode=WAL;"))
-        
-        # Set synchronous mode to NORMAL for better performance
-        conn.execute(text("PRAGMA synchronous=NORMAL;"))
-        
-        # Enable memory-mapped I/O for the database file (30GB limit)
-        conn.execute(text("PRAGMA mmap_size=30000000000;"))
-        
-        # Set cache size to 20000 pages (about 80MB)
-        conn.execute(text("PRAGMA cache_size=20000;"))
-        
-        # Enable foreign key constraints
-        conn.execute(text("PRAGMA foreign_keys=ON;"))
-        
-        # Set busy timeout to 30 seconds
-        conn.execute(text("PRAGMA busy_timeout=30000;"))
-        
-        # Enable automatic index creation
-        conn.execute(text("PRAGMA automatic_index=ON;"))
-        
-        # Set temp store to memory for better performance
-        conn.execute(text("PRAGMA temp_store=MEMORY;"))
-        
-        # Optimize page size for better I/O
-        conn.execute(text("PRAGMA page_size=4096;"))
-        
-        # Create additional indexes for better query performance
-        try:
-            # Index for recent searches
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_image_searches_recent 
-                ON image_searches(search_time DESC, id DESC);
-            """))
-            
-            # Index for search results by search_id and price
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_search_results_search_price 
-                ON search_results(search_id, price);
-            """))
-            
-            # Index for search results by brand
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_search_results_brand 
-                ON search_results(brand) WHERE brand IS NOT NULL;
-            """))
-            
-            # Composite index for filtering
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_search_results_composite 
-                ON search_results(search_id, brand, price);
-            """))
-            
-            logger.info("Additional database indexes created successfully")
-            
-        except Exception as e:
-            logger.warning(f"Some indexes may already exist: {e}")
-        
-        # Analyze the database to optimize query planning
-        conn.execute(text("ANALYZE;"))
-        
-        # Update statistics for better query optimization
-        conn.execute(text("PRAGMA optimize;"))
-    
-    logger.info("Database optimized successfully.")
+
+    try:
+        with engine.begin() as conn:
+            # ---------- Engine-specific tuning ----------
+            if _is_sqlite(engine):
+                # These PRAGMAs are safe to attempt; failures are logged and ignored
+                _safe_exec(conn, "PRAGMA journal_mode=WAL;")          # better concurrency
+                _safe_exec(conn, "PRAGMA synchronous=NORMAL;")         # durability/perf balance
+                _safe_exec(conn, "PRAGMA mmap_size=30000000000;")      # 30GB; ignored if unsupported
+                _safe_exec(conn, "PRAGMA cache_size=20000;")           # ~80MB if 4KB pages
+                _safe_exec(conn, "PRAGMA foreign_keys=ON;")
+                _safe_exec(conn, "PRAGMA busy_timeout=30000;")         # 30s
+                _safe_exec(conn, "PRAGMA automatic_index=ON;")
+                _safe_exec(conn, "PRAGMA temp_store=MEMORY;")
+                _safe_exec(conn, "PRAGMA page_size=4096;")             # note: requires VACUUM to take effect
+
+            # ---------- Conditional indexes ----------
+            idx_statements = [
+                # table_name, create_index_sql
+                (
+                    "image_searches",
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_image_searches_recent
+                    ON image_searches (search_time DESC, id DESC)
+                    """,
+                ),
+                (
+                    "search_results",
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_search_results_search_price
+                    ON search_results (search_id, price)
+                    """,
+                ),
+                (
+                    "search_results",
+                    """
+                    -- partial index helps when brand is frequently NULL
+                    CREATE INDEX IF NOT EXISTS idx_search_results_brand
+                    ON search_results (brand)
+                    WHERE brand IS NOT NULL
+                    """,
+                ),
+                (
+                    "search_results",
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_search_results_composite
+                    ON search_results (search_id, brand, price)
+                    """,
+                ),
+            ]
+
+            created_any = False
+            for table_name, sql in idx_statements:
+                if _table_exists(engine, table_name):
+                    _safe_exec(conn, sql)
+                    created_any = True
+                else:
+                    logger.info("Skipping index creation: table '%s' not found.", table_name)
+
+            if created_any:
+                logger.info("Index ensure step completed.")
+
+            # ---------- Planner stats ----------
+            # ANALYZE works on SQLite and Postgres; harmless if already analyzed.
+            _safe_exec(conn, "ANALYZE;")
+            if _is_sqlite(engine):
+                _safe_exec(conn, "PRAGMA optimize;")
+
+        logger.info("Database optimization completed successfully.")
+
+    finally:
+        # Free pooled connections
+        engine.dispose()
 
 if __name__ == "__main__":
     optimize_database()
