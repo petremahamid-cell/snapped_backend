@@ -54,7 +54,7 @@ class Settings:
         self.REQUIRE_CLOUDINARY: bool = os.getenv("REQUIRE_CLOUDINARY", "false").lower() == "true"
         
         # Server settings
-        self.HOST: str = os.getenv("HOST", "0.0.0.0")
+        self.HOST: str = os.getenv("HOST", "127.0.0.1")
         self.PORT: int = int(os.getenv("PORT", "12000"))
         self.WORKERS: int = int(os.getenv("WORKERS", "4"))
         # Public base URL used to build absolute URLs for external services (e.g., SerpAPI)

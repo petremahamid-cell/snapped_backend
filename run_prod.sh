@@ -7,4 +7,4 @@ source venv/bin/activate
 pip install gunicorn uvicorn
 
 # Run with Gunicorn
-gunicorn app.main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:12000
+gunicorn app.main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 127.0.0.1:12000
