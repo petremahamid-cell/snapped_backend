@@ -85,6 +85,14 @@ echo "🌐 Configuring Nginx..."
 sudo cp /opt/snapped_backend/nginx.conf /etc/nginx/sites-available/snapped_backend
 sudo ln -sf /etc/nginx/sites-available/snapped_backend /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
+
+# Define rate limit zones in http context (not inside server block)
+sudo mkdir -p /etc/nginx/conf.d
+sudo tee /etc/nginx/conf.d/snapped_rate_limit.conf > /dev/null << 'EOF'
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=upload:10m rate=2r/s;
+EOF
+
 sudo nginx -t
 sudo systemctl enable nginx
 sudo systemctl restart nginx
