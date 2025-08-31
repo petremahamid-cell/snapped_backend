@@ -200,7 +200,7 @@ sudo ufw allow 'Nginx HTTP'
 sudo ufw --force enable
 
 # -------- Flip HTTPS->HTTP in env (CORS/links) --------
-for f in /opt/snapped_backend/.env /opt/snapped_backend/.env.production; do
+for f in /opt/snapped_backend/.env.production /opt/snapped_backend/.env.production; do
   if [ -f "$f" ]; then
     sudo sed -i -E 's#^(BACKEND_CORS_ORIGINS=)https://#\1http://#' "$f" || true
     sudo sed -i -E 's#^(PUBLIC_BASE_URL=)https://#\1http://#' "$f" || true
