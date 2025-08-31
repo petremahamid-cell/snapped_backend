@@ -1,156 +1,182 @@
 #!/bin/bash
+# Snapped Backend — EC2 installer (Ubuntu 22.04)
+# - HTTP-only Nginx (no SSL, no redirects)
+# - Gunicorn via systemd (no Supervisor)
+# - Rate limiting zones in http{} (conf.d)
+# - Health & backup scripts
+# - UFW, Redis
+set -euo pipefail
 
-# AWS EC2 Installation Script for Snapped Backend
-# Run this script on a fresh Ubuntu 22.04 LTS EC2 instance
+echo "🚀 Starting Snapped Backend installation..."
 
-set -e
-
-echo "🚀 Starting Snapped Backend installation on AWS EC2..."
-
-# Update system packages
-echo "📦 Updating system packages..."
-sudo apt update && sudo apt upgrade -y
-
-# Install system dependencies
-echo "🔧 Installing system dependencies..."
+# -------- System & packages --------
+sudo apt update && sudo apt -y upgrade
 sudo apt install -y \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
-    nginx \
-    redis-server \
-    git \
-    curl \
-    wget \
-    unzip \
-    supervisor \
-    htop \
-    ufw \
-    certbot \
-    python3-certbot-nginx \
-    build-essential \
-    libpq-dev \
-    libjpeg-dev \
-    libpng-dev \
-    libfreetype6-dev \
-    pkg-config
+  python3.11 python3.11-venv python3.11-dev python3-pip \
+  nginx redis-server git curl wget unzip htop ufw \
+  certbot python3-certbot-nginx \
+  build-essential libpq-dev libjpeg-dev libpng-dev libfreetype6-dev pkg-config
 
-# Create application user
-echo "👤 Creating application user..."
-sudo useradd -m -s /bin/bash snapped || true
+# -------- App user & dirs --------
+if ! id -u snapped >/dev/null 2>&1; then
+  sudo useradd -m -s /bin/bash snapped
+fi
 sudo usermod -aG sudo snapped
+sudo mkdir -p /opt/snapped_backend /var/log/snapped /var/run/snapped
+sudo chown -R snapped:snapped /opt/snapped_backend /var/log/snapped /var/run/snapped
 
-# Create application directories
-echo "📁 Creating application directories..."
-sudo mkdir -p /opt/snapped_backend
-sudo mkdir -p /var/log/snapped
-sudo mkdir -p /var/run/snapped
-sudo chown -R snapped:snapped /opt/snapped_backend
-sudo chown -R snapped:snapped /var/log/snapped
-sudo chown -R snapped:snapped /var/run/snapped
+# -------- Repo (edit URL if needed) --------
+if [ ! -d /opt/snapped_backend/.git ]; then
+  sudo git clone https://github.com/your-username/snapped_backend.git /opt/snapped_backend
+  sudo chown -R snapped:snapped /opt/snapped_backend
+fi
 
-# Clone the repository (you'll need to replace with your actual repo)
-echo "📥 Cloning repository..."
-cd /opt
-sudo git clone https://github.com/your-username/snapped_backend.git || true
-sudo chown -R snapped:snapped /opt/snapped_backend
-
-# Switch to application user for Python setup
-echo "🐍 Setting up Python environment..."
-sudo -u snapped bash << 'EOF'
+# -------- Python env --------
+sudo -u snapped bash <<'PYSETUP'
+set -euo pipefail
 cd /opt/snapped_backend
-
-# Create virtual environment
 python3.11 -m venv venv
 source venv/bin/activate
-
-# Upgrade pip
 pip install --upgrade pip
+[ -f requirements.txt ] && pip install -r requirements.txt
+# seed .env from production if missing
+[ -f .env ] || { [ -f .env.production ] && cp .env.production .env || true; }
+PYSETUP
 
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Create production environment file
-cp .env.production .env
-EOF
-
-# Configure Redis
-echo "🔴 Configuring Redis..."
+# -------- Redis --------
 sudo systemctl enable redis-server
-sudo systemctl start redis-server
+sudo systemctl restart redis-server
 
-# Configure Nginx
-echo "🌐 Configuring Nginx..."
-sudo cp /opt/snapped_backend/nginx.conf /etc/nginx/sites-available/snapped_backend
-sudo ln -sf /etc/nginx/sites-available/snapped_backend /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
+# -------- Detect public hostname (fallbacks) --------
+get_meta() {
+  # Try IMDSv2 then fallback
+  TOKEN=$(curl -fsS -m 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" || true)
+  if [ -n "${TOKEN:-}" ]; then
+    curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/public-hostname" || true
+  else
+    curl -fsS -m 2 "http://169.254.169.254/latest/meta-data/public-hostname" || true
+  fi
+}
+HOST="$(get_meta || true)"
+[ -z "$HOST" ] && HOST="$(hostname -f || true)"
+[ -z "$HOST" ] && HOST="_"
+echo "🌐 Using server_name: $HOST"
 
-# Ensure no invalid limit_req_zone directives remain in site file
-sudo sed -i '/limit_req_zone/d' /etc/nginx/sites-available/snapped_backend
+# -------- Nginx (HTTP only) --------
+sudo mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled
 
-
-# Define rate limit zones in http context (not inside server block)
-sudo mkdir -p /etc/nginx/conf.d
-sudo tee /etc/nginx/conf.d/snapped_rate_limit.conf > /dev/null << 'EOF'
+# http-level rate limits (zones cannot be in server{})
+sudo tee /etc/nginx/conf.d/snapped_rate_limit.conf >/dev/null <<'NGX'
 limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=upload:10m rate=2r/s;
-EOF
+NGX
+
+# site config (no SSL, no redirect)
+sudo tee /etc/nginx/sites-available/snapped_backend >/dev/null <<NGX
+server {
+    listen 80;
+    server_name ${HOST} _;
+
+    client_max_body_size 20M;
+
+    access_log /var/log/nginx/snapped_access.log;
+    error_log  /var/log/nginx/snapped_error.log;
+
+    location /static/ {
+        alias /opt/snapped_backend/app/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    location /api/ {
+        limit_req zone=api burst=20 nodelay;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        proxy_set_header Upgrade           \$http_upgrade;
+        proxy_set_header Connection        "upgrade";
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;
+        proxy_buffering off;
+    }
+
+    location = /api/v1/images/upload {
+        limit_req zone=upload burst=5 nodelay;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade           \$http_upgrade;
+        proxy_set_header Connection        "upgrade";
+
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+        proxy_buffering off;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        access_log off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade           \$http_upgrade;
+        proxy_set_header Connection        "upgrade";
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;
+    }
+}
+NGX
+
+sudo ln -sf /etc/nginx/sites-available/snapped_backend /etc/nginx/sites-enabled/snapped_backend
+sudo rm -f /etc/nginx/sites-enabled/default
+
+# Nuke any stray SSL directives / 443 listeners from older files
+sudo sed -i -E 's/^\s*(ssl_certificate(_key)?\s+)/# \1/' /etc/nginx/nginx.conf || true
+sudo sed -i -E 's/^\s*(ssl_certificate(_key)?\s+)/# \1/' /etc/nginx/sites-available/* 2>/dev/null || true
+sudo sed -i -E 's/^\s*(ssl_certificate(_key)?\s+)/# \1/' /etc/nginx/conf.d/*.conf 2>/dev/null || true
+sudo sed -i -E 's/^\s*listen\s+443(.*)$/# listen 443 \1/' /etc/nginx/sites-available/* 2>/dev/null || true
+sudo sed -i -E 's/^\s*listen\s+\[::\]:443(.*)$/# listen [::]:443 \1/' /etc/nginx/sites-available/* 2>/dev/null || true
 
 sudo nginx -t
 sudo systemctl enable nginx
 sudo systemctl restart nginx
 
-# Configure Supervisor for Gunicorn
-echo "👮 Configuring Supervisor..."
-sudo tee /etc/supervisor/conf.d/snapped_backend.conf > /dev/null << 'EOF'
-[program:snapped_backend]
-command=/opt/snapped_backend/venv/bin/gunicorn -c /opt/snapped_backend/gunicorn.conf.py app.main:app
-directory=/opt/snapped_backend
-user=snapped
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/snapped/gunicorn.log
-stdout_logfile_maxbytes=50MB
-stdout_logfile_backups=10
-environment=PATH="/opt/snapped_backend/venv/bin"
-EOF
-
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo systemctl enable supervisor
-sudo systemctl start supervisor
-
-# Configure firewall
-echo "🔥 Configuring firewall..."
-sudo ufw allow ssh
-sudo ufw allow 'Nginx Full'
-sudo ufw --force enable
-
-# Initialize database
-echo "🗄️ Initializing database..."
-sudo -u snapped bash << 'EOF'
-cd /opt/snapped_backend
-source venv/bin/activate
-python -c "
-from app.db.init_db import init_db
-from app.db.optimize import optimize_database
-import asyncio
-asyncio.run(init_db())
-optimize_database()
-"
-EOF
-
-# Create systemd service for the application (alternative to supervisor)
-echo "⚙️ Creating systemd service..."
-sudo tee /etc/systemd/system/snapped_backend.service > /dev/null << 'EOF'
+# -------- Gunicorn via systemd --------
+sudo tee /etc/systemd/system/snapped_backend.service >/dev/null <<'UNIT'
 [Unit]
-Description=Snapped Backend API
+Description=Snapped Backend API (Gunicorn)
 After=network.target
 
 [Service]
-Type=exec
+Type=simple
 User=snapped
 Group=snapped
 WorkingDirectory=/opt/snapped_backend
@@ -162,16 +188,46 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
 
-# Enable and start the service
 sudo systemctl daemon-reload
 sudo systemctl enable snapped_backend
-sudo systemctl start snapped_backend
+sudo systemctl restart snapped_backend
 
-# Create log rotation
-echo "📋 Setting up log rotation..."
-sudo tee /etc/logrotate.d/snapped_backend > /dev/null << 'EOF'
+# -------- UFW --------
+sudo ufw allow ssh
+sudo ufw allow 'Nginx HTTP'
+sudo ufw --force enable
+
+# -------- Flip HTTPS->HTTP in env (CORS/links) --------
+for f in /opt/snapped_backend/.env /opt/snapped_backend/.env.production; do
+  if [ -f "$f" ]; then
+    sudo sed -i -E 's#^(BACKEND_CORS_ORIGINS=)https://#\1http://#' "$f" || true
+    sudo sed -i -E 's#^(PUBLIC_BASE_URL=)https://#\1http://#' "$f" || true
+  fi
+done
+sudo systemctl restart snapped_backend
+
+# -------- DB init (safe) --------
+sudo -u snapped bash <<'DBINIT'
+set -euo pipefail
+cd /opt/snapped_backend
+source venv/bin/activate
+python - <<'PY'
+import asyncio
+try:
+    from app.db.init_db import init_db
+    from app.db.optimize import optimize_database
+except Exception as e:
+    print("Skipping DB init:", e)
+else:
+    asyncio.run(init_db())
+    optimize_database()
+PY
+DBINIT
+
+# -------- Logrotate --------
+sudo tee /etc/logrotate.d/snapped_backend >/dev/null <<'ROT'
 /var/log/snapped/*.log {
     daily
     missingok
@@ -179,81 +235,50 @@ sudo tee /etc/logrotate.d/snapped_backend > /dev/null << 'EOF'
     compress
     delaycompress
     notifempty
-    create 644 snapped snapped
+    create 0644 snapped snapped
     postrotate
-        systemctl reload snapped_backend
+        systemctl reload snapped_backend >/dev/null 2>&1 || true
     endscript
 }
-EOF
+ROT
 
-# Create health check script
-echo "🏥 Creating health check script..."
-sudo tee /opt/snapped_backend/health_check.sh > /dev/null << 'EOF'
+# -------- Health script --------
+sudo tee /opt/snapped_backend/health_check.sh >/dev/null <<'HCHK'
 #!/bin/bash
-response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health)
-if [ $response -eq 200 ]; then
-    echo "✅ Service is healthy"
-    exit 0
+set -e
+response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)
+if [ "$response" -eq 200 ]; then
+  echo "✅ Service is healthy"
 else
-    echo "❌ Service is unhealthy (HTTP $response)"
-    exit 1
+  echo "❌ Service is unhealthy (HTTP $response)"
+  exit 1
 fi
-EOF
-
+HCHK
 sudo chmod +x /opt/snapped_backend/health_check.sh
 
-# Create backup script
-echo "💾 Creating backup script..."
-sudo tee /opt/snapped_backend/backup.sh > /dev/null << 'EOF'
+# -------- Backup script (SQLite example) --------
+sudo tee /opt/snapped_backend/backup.sh >/dev/null <<'BKP'
 #!/bin/bash
+set -euo pipefail
 BACKUP_DIR="/opt/backups/snapped"
 DATE=$(date +%Y%m%d_%H%M%S)
+mkdir -p "$BACKUP_DIR"
 
-mkdir -p $BACKUP_DIR
+[ -f /opt/snapped_backend/app.db ] && cp /opt/snapped_backend/app.db "$BACKUP_DIR/app_${DATE}.db"
+[ -d /opt/snapped_backend/app/static/uploads ] && \
+  tar -czf "$BACKUP_DIR/uploads_${DATE}.tar.gz" -C /opt/snapped_backend/app/static uploads/
 
-# Backup database
-cp /opt/snapped_backend/app.db $BACKUP_DIR/app_${DATE}.db
-
-# Backup uploaded files
-tar -czf $BACKUP_DIR/uploads_${DATE}.tar.gz -C /opt/snapped_backend/app/static uploads/
-
-# Keep only last 7 days of backups
-find $BACKUP_DIR -name "*.db" -mtime +7 -delete
-find $BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete
-
+find "$BACKUP_DIR" -name "*.db" -mtime +7 -delete || true
+find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete || true
 echo "Backup completed: $DATE"
-EOF
-
+BKP
 sudo chmod +x /opt/snapped_backend/backup.sh
+( sudo crontab -l 2>/dev/null; echo "0 2 * * * /opt/snapped_backend/backup.sh >> /var/log/snapped/backup.log 2>&1" ) | sudo crontab -
 
-# Add backup to crontab
-echo "⏰ Setting up automated backups..."
-(sudo crontab -l 2>/dev/null; echo "0 2 * * * /opt/snapped_backend/backup.sh >> /var/log/snapped/backup.log 2>&1") | sudo crontab -
+# -------- Final status --------
+echo "🔍 Services:"
+sudo systemctl --no-pager status snapped_backend || true
+sudo systemctl --no-pager status nginx || true
+sudo systemctl --no-pager status redis-server || true
 
-# Final status check
-echo "🔍 Checking service status..."
-sudo systemctl status snapped_backend --no-pager
-sudo systemctl status nginx --no-pager
-sudo systemctl status redis-server --no-pager
-
-echo ""
-echo "🎉 Installation completed successfully!"
-echo ""
-echo "📋 Next steps:"
-echo "1. Update /opt/snapped_backend/.env with your actual configuration"
-echo "2. Update nginx.conf with your domain name"
-echo "3. Set up SSL certificate with: sudo certbot --nginx -d your-domain.com"
-echo "4. Restart services: sudo systemctl restart snapped_backend nginx"
-echo "5. Test the API: curl http://your-server-ip/health"
-echo ""
-echo "📊 Useful commands:"
-echo "- Check logs: sudo journalctl -u snapped_backend -f"
-echo "- Restart service: sudo systemctl restart snapped_backend"
-echo "- Check health: /opt/snapped_backend/health_check.sh"
-echo "- Manual backup: /opt/snapped_backend/backup.sh"
-echo ""
-echo "🔧 Configuration files:"
-echo "- App config: /opt/snapped_backend/.env"
-echo "- Nginx config: /etc/nginx/sites-available/snapped_backend"
-echo "- Gunicorn config: /opt/snapped_backend/gunicorn.conf.py"
-echo ""
+echo "✅ Done. Site is HTTP-only on: http://$HOST"
