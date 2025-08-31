@@ -7,7 +7,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 from app.utils.performance import timed_async, run_in_threadpool
-from app.utils.connection_pool import get_http_client
+# from app.utils.connection_pool import get_http_client  # NOTE: not used to avoid http2=True defaults
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -80,12 +80,12 @@ def normalize_title(title: str) -> str:
     """
     if not title:
         return title
-    
+
     # Remove the "Similar Item" and other dynamic parts of the title
     title = re.sub(r'\(Similar Item \d+\)', '', title)  # Remove "Similar Item X"
     title = re.sub(r'\s*\([^\)]*\)', '', title)         # Remove any parenthesis-based details (like sizes, etc.)
     title = re.sub(r'\s+', ' ', title).strip()          # Clean up extra spaces
-    
+
     return title.lower()  # Use lowercase for a case-insensitive comparison
 
 # --- Deduplication function ---
@@ -105,9 +105,32 @@ def filter_duplicates(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if normalized_title not in seen:
             unique_products.append(product)
             seen.add(normalized_title)
-            
+
     return unique_products
 
+# ---------- HTTP client helpers (force HTTP/1.1) ----------
+_DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=5.0, read=15.0, write=15.0)
+
+def _build_http1_client() -> httpx.AsyncClient:
+    """
+    Build an AsyncClient that explicitly uses HTTP/1.1 to avoid the `h2` dependency.
+    """
+    headers = {
+        "User-Agent": "snapped-backend/1.0 (+https://example.com)",
+        "Accept": "application/json",
+    }
+    return httpx.AsyncClient(
+        http2=False,                # <-- critical: avoid requiring `h2`
+        timeout=_DEFAULT_TIMEOUT,
+        follow_redirects=True,
+        headers=headers,
+    )
+
+async def _sleep_with_jitter(base_seconds: float) -> None:
+    # small jitter to avoid thundering herd
+    await asyncio.sleep(base_seconds + (base_seconds * 0.25 * (os.urandom(1)[0] / 255)))
+
+# ---------- Main API ----------
 @timed_async
 @cache_decorator  # Cache results for 1 hour
 async def search_similar_products(image_url: str) -> List[Dict[str, Any]]:
@@ -121,45 +144,85 @@ async def search_similar_products(image_url: str) -> List[Dict[str, Any]]:
         List of similar products with title, link, image_url, price, brand, rating, reviews_count, source
     """
     api_url = "https://serpapi.com/search.json"
+    api_key = getattr(settings, "SERPAPI_API_KEY", None)
+    if not api_key:
+        logger.error("SERPAPI_API_KEY is missing from settings")
+        return []
+
     params = {
         "engine": "google_lens",
-        "url": image_url,                    # SerpAPI accepts a URL for Google Lens
-        "api_key": settings.SERPAPI_API_KEY,
+        "url": image_url,         # SerpAPI accepts a URL for Google Lens
+        "api_key": api_key,
         "hl": "en",
-        "gl": "us"
+        "gl": "us",
     }
 
-    client = await get_http_client()
-    for attempt in range(3):
-        try:
-            logger.info(f"Making Google Lens request for image: {image_url}")
-            response = await client.get(api_url, params=params)
+    # Force a local HTTP/1.1 client to avoid http2-related crashes
+    async with _build_http1_client() as client:
+        for attempt in range(3):
+            try:
+                logger.info(f"Making Google Lens request for image: {image_url} (attempt {attempt+1}/3)")
+                response = await client.get(api_url, params=params)
+                # Handle rate limiting explicitly
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", "2"))
+                    logger.warning(f"SerpAPI rate-limited (429). Waiting {retry_after}s before retry.")
+                    if attempt == 2:
+                        logger.error("SerpAPI rate-limited after 3 attempts")
+                        return []
+                    await asyncio.sleep(retry_after)
+                    continue
 
-            if response.status_code != 200:
-                raise Exception(
-                    f"Google Lens request failed with status {response.status_code}: {response.text}"
+                # Raise for 4xx/5xx to enter except block with details
+                response.raise_for_status()
+
+                data = response.json()
+                products = await process_google_lens_response(data)
+
+                if not products:
+                    logger.warning(f"No products found for image: {image_url}")
+                    return []
+
+                # Filter products where price is not available
+                products_with_price = [p for p in products if p.get("price")]
+                logger.info(f"Found {len(products_with_price)} products with valid prices from Google Lens")
+                return products_with_price
+
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt == 2:
+                    logger.error(f"Google Lens request failed after 3 attempts due to network error: {str(e)}")
+                    raise
+                wait_time = 2 ** attempt  # 1, 2 seconds (we handle 429 separately)
+                logger.warning(
+                    f"Network issue contacting SerpAPI (attempt {attempt+1}/3). "
+                    f"Retrying in {wait_time}s: {repr(e)}"
                 )
+                await _sleep_with_jitter(wait_time)
 
-            data = response.json()
-            products = await process_google_lens_response(data)
-
-            if not products:
-                logger.warning(f"No products found for image: {image_url}")
+            except httpx.HTTPStatusError as e:
+                # Non-429 4xx/5xx
+                status = e.response.status_code
+                body = e.response.text[:500]
+                logger.error(f"SerpAPI HTTP {status}: {body}")
+                # Retry 5xx; do not retry 4xx except 429 (handled above)
+                if 500 <= status < 600 and attempt < 2:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Retrying after server error in {wait_time}s")
+                    await _sleep_with_jitter(wait_time)
+                    continue
                 return []
 
-            # Filter products where price is not available
-            products_with_price = [product for product in products if product.get("price")]
-            
-            logger.info(f"Found {len(products_with_price)} products with valid prices from Google Lens")
-            return products_with_price
+            except Exception as e:
+                # Catch-all (including any accidental http2/h2 issues elsewhere)
+                if attempt == 2:
+                    logger.exception(f"Unexpected error during SerpAPI request: {e}")
+                    raise
+                wait_time = 2 ** attempt
+                logger.warning(f"Unexpected error (attempt {attempt+1}/3). Retrying in {wait_time}s: {repr(e)}")
+                await _sleep_with_jitter(wait_time)
 
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            if attempt == 2:
-                logger.error(f"Google Lens request failed after 3 attempts: {str(e)}")
-                raise
-            wait_time = 2 ** attempt  # 1, 2, 4 seconds
-            logger.warning(f"Google Lens request failed (attempt {attempt+1}/3). Retrying in {wait_time}s: {str(e)}")
-            await asyncio.sleep(wait_time)
+    # Should not reach here
+    return []
 
 async def process_google_lens_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -228,10 +291,12 @@ async def process_google_lens_response(data: Dict[str, Any]) -> List[Dict[str, A
 
     # If no valid products, log it and return an empty list
     if not products_with_price:
-        logger.warning(f"No valid products with price found. Returning empty list.")
+        logger.warning("No valid products with price found. Returning empty list.")
         return []
-    # Enforce max cap
-    return products_with_price[:settings.MAX_SIMILAR_PRODUCTS]
+
+    # Enforce max cap (with safe default)
+    max_results = getattr(settings, "MAX_SIMILAR_PRODUCTS", 32)
+    return products_with_price[:max_results]
 
 def extract_product_info(product: Dict[str, Any]) -> Dict[str, Any]:
     """
