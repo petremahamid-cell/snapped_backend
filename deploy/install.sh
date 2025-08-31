@@ -86,6 +86,10 @@ sudo cp /opt/snapped_backend/nginx.conf /etc/nginx/sites-available/snapped_backe
 sudo ln -sf /etc/nginx/sites-available/snapped_backend /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
+# Ensure no invalid limit_req_zone directives remain in site file
+sudo sed -i '/limit_req_zone/d' /etc/nginx/sites-available/snapped_backend
+
+
 # Define rate limit zones in http context (not inside server block)
 sudo mkdir -p /etc/nginx/conf.d
 sudo tee /etc/nginx/conf.d/snapped_rate_limit.conf > /dev/null << 'EOF'
