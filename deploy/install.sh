@@ -82,7 +82,7 @@ sudo systemctl start redis-server
 
 # Configure Nginx
 echo "🌐 Configuring Nginx..."
-sudo cp /opt/snapped_backend/main/nginx.conf /etc/nginx/sites-available/snapped_backend
+sudo cp /opt/snapped_backend/nginx.conf /etc/nginx/sites-available/snapped_backend
 sudo ln -sf /etc/nginx/sites-available/snapped_backend /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
