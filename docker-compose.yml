@@ -12,7 +12,7 @@ services:
       - SERPAPI_API_KEY=${SERPAPI_API_KEY}
       - DATABASE_URL=sqlite:///./app.db
       - MAX_SIMILAR_PRODUCTS=30
-      - HOST=0.0.0.0
+      - HOST=127.0.0.1
       - PORT=12000
       - REDIS_ENABLED=true
       - REDIS_URL=redis://redis:6379/0
