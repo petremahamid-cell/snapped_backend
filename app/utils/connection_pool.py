@@ -2,6 +2,7 @@ import httpx
 import asyncio
 from typing import Optional
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,28 @@ class HTTPConnectionPool:
                 write=10.0,
                 pool=5.0
             )
+
+                        
+            # Enable HTTP/2 only if dependencies are available or explicitly requested
+            http2_env = os.getenv("HTTPX_HTTP2", "auto").lower()
+            http2_enabled = False
+            if http2_env in ("1", "true", "yes", "on"):
+                http2_enabled = True
+            elif http2_env == "auto":
+                try:
+                    import h2  # type: ignore
+                    http2_enabled = True
+                except Exception:
+                    http2_enabled = False
+
             
             self._client = httpx.AsyncClient(
                 limits=limits,
                 timeout=timeout,
-                http2=True,  # Enable HTTP/2 for better performance
+                http2=http2_enabled,  # Enable HTTP/2 for better performance
                 follow_redirects=True
             )
-            logger.info("HTTP connection pool initialized")
+            logger.info(f"HTTP connection pool initialized (http2={http2_enabled})")
         
         return self._client
     
