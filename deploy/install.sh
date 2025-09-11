@@ -32,6 +32,7 @@ if [ ! -d /opt/snapped_backend/.git ]; then
 else
   # Pull the latest changes if the repo already exists
   cd /opt/snapped_backend
+  sudo -u snapped git checkout -- .env.production
   sudo -u snapped git pull origin main
 fi
 
