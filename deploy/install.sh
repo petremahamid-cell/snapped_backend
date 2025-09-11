@@ -32,8 +32,13 @@ if [ ! -d /opt/snapped_backend/.git ]; then
 else
   # Pull the latest changes if the repo already exists
   cd /opt/snapped_backend
-  sudo -u snapped git checkout -- .env.production
+  sudo -u snapped git stash --include-untracked
+  
+  # Pull the latest changes from the main branch
   sudo -u snapped git pull origin main
+  
+  # Apply the stashed changes back (if any)
+  sudo -u snapped git stash pop
 fi
 
 # -------- Python env --------
