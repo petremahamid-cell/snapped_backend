@@ -183,10 +183,7 @@ async def search_similar_products(image_url: str) -> List[Dict[str, Any]]:
                     logger.warning(f"No products found for image: {image_url}")
                     return []
 
-                # Filter products where price is not available
-                products_with_price = [p for p in products if p.get("price")]
-                logger.info(f"Found {len(products_with_price)} products with valid prices from Google Lens")
-                return products_with_price
+                return products
 
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 if attempt == 2:
@@ -281,7 +278,7 @@ async def process_google_lens_response(data: Dict[str, Any]) -> List[Dict[str, A
             "reviews_count": item.get("reviews") or item.get("reviews_count") or None,
         }
         products.append(product)
-
+    
     # Deduplicate using thread pool to avoid blocking event loop
     unique_products = await run_in_threadpool(filter_duplicates, products)
     logger.info(f"Products after deduplication: {len(unique_products)}")
