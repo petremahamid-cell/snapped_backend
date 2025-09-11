@@ -286,17 +286,9 @@ async def process_google_lens_response(data: Dict[str, Any]) -> List[Dict[str, A
     unique_products = await run_in_threadpool(filter_duplicates, products)
     logger.info(f"Products after deduplication: {len(unique_products)}")
 
-    # Filter out products without a valid price
-    products_with_price = [product for product in unique_products if product.get("price")]
-
-    # If no valid products, log it and return an empty list
-    if not products_with_price:
-        logger.warning("No valid products with price found. Returning empty list.")
-        return []
-
     # Enforce max cap (with safe default)
     max_results = getattr(settings, "MAX_SIMILAR_PRODUCTS", 32)
-    return products_with_price[:max_results]
+    return unique_products[:max_results]
 
 def extract_product_info(product: Dict[str, Any]) -> Dict[str, Any]:
     """
