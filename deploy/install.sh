@@ -31,6 +31,7 @@ if [ ! -d /opt/snapped_backend/.git ]; then
   sudo chown -R snapped:snapped /opt/snapped_backend
 else
   # Pull the latest changes if the repo already exists
+  sudo -u snapped -i
   cd /opt/snapped_backend
   sudo git pull origin main
 fi
