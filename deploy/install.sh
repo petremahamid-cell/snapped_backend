@@ -29,13 +29,18 @@ sudo chown -R snapped:snapped /opt/snapped_backend /var/log/snapped /var/run/sna
 if [ ! -d /opt/snapped_backend/.git ]; then
   sudo git clone https://github.com/your-username/snapped_backend.git /opt/snapped_backend
   sudo chown -R snapped:snapped /opt/snapped_backend
+else
+  # Pull the latest changes if the repo already exists
+  cd /opt/snapped_backend
+  sudo git pull origin main
 fi
 
 # -------- Python env --------
 sudo -u snapped bash <<'PYSETUP'
 set -euo pipefail
 cd /opt/snapped_backend
-python3.11 -m venv venv
+rm -rf venv  # Remove the existing virtual environment
+python3.11 -m venv venv  # Recreate the virtual environment
 source venv/bin/activate
 pip install --upgrade pip
 [ -f requirements.txt ] && pip install -r requirements.txt
