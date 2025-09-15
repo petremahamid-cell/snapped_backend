@@ -152,23 +152,6 @@ async def get_filtered_results(
     """
     query = db.query(SearchResult).filter(SearchResult.search_id == search_id)
     
-    # Apply filters
-    if filters:
-        if filters.brand:
-            brand_filters = [SearchResult.brand.ilike(f"%{brand}%") for brand in filters.brand]
-            query = query.filter(or_(*brand_filters))
-        
-        if filters.price_min is not None or filters.price_max is not None:
-            # This is a simplified approach - in a real app, you'd need to handle currency conversion
-            # and proper numeric comparison
-            if filters.price_min is not None:
-                query = query.filter(SearchResult.price.op('REGEXP')(f'[0-9]+(\.[0-9]+)? >= {filters.price_min}'))
-            
-            if filters.price_max is not None:
-                query = query.filter(SearchResult.price.op('REGEXP')(f'[0-9]+(\.[0-9]+)? <= {filters.price_max}'))
-        
-        if filters.source:
-            query = query.filter(SearchResult.source.in_(filters.source))
     
     # Get total count
     total = query.count()
