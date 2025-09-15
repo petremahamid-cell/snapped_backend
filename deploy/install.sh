@@ -35,7 +35,7 @@ else
   sudo -u snapped git stash --include-untracked
   
   # Pull the latest changes from the main branch
-  sudo -u snapped git pull origin main
+  sudo -u snapped git pull origin main --no-rebase
   
   # Apply the stashed changes back (if any)
   sudo -u snapped git stash pop
