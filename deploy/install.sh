@@ -27,7 +27,7 @@ sudo chown -R snapped:snapped /opt/snapped_backend /var/log/snapped /var/run/sna
 
 # -------- Repo (edit URL if needed) --------
 if [ ! -d /opt/snapped_backend/.git ]; then
-  sudo git clone https://github.com/your-username/snapped_backend.git /opt/snapped_backend
+  sudo git clone https://github.com/petremahamid-cell/snapped_backend.git /opt/snapped_backend
   sudo chown -R snapped:snapped /opt/snapped_backend
 else
   # Pull the latest changes if the repo already exists
