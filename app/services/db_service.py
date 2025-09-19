@@ -2,7 +2,6 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, and_
 from typing import List, Dict, Any, Optional, Tuple
 from app.models.search import ImageSearch, SearchResult
-from app.models.schemas import ProductFilter
 from app.services.serpapi_service import extract_product_info
 import logging
 
@@ -50,33 +49,29 @@ async def create_image_search(
     return db_search
 
 async def create_search_results(db: Session, search_id: int, products: List[Dict[str, Any]]) -> List[SearchResult]:
-    """
-    Create search result records for a search
-    
-    Args:
-        db: Database session
-        search_id: ID of the associated search
-        products: List of product dictionaries
-        
-    Returns:
-        List of created SearchResult objects
-    """
+    """ Create search result records for a search """
     db_results = []
-    
     for product in products:
         product_info = extract_product_info(product)
         db_result = SearchResult(search_id=search_id, **product_info)
         db.add(db_result)
         db_results.append(db_result)
     
-    db.commit()
-    
+    logger.info("Committing transaction...")
+    db.commit()  # Commit the changes to the database
+
     # Refresh all results to get their IDs
+    logger.info("Refreshing results...")
     for result in db_results:
-        db.refresh(result)
+        db.refresh(result)  # This ensures that each result has its `id` set
     
     logger.info(f"Created {len(db_results)} search results for search ID {search_id}")
+    
+    for result in db_results:
+        logger.info(f"Result ID: {result.id}")  # Log the id of each result
+    
     return db_results
+
 
 async def get_search_by_id(db: Session, search_id: int) -> Optional[ImageSearch]:
     """
@@ -133,7 +128,6 @@ async def get_search_count(db: Session) -> int:
 async def get_filtered_results(
     db: Session,
     search_id: int,
-    filters: ProductFilter,
     skip: int = 0,
     limit: int = 100
 ) -> Tuple[List[SearchResult], int]:

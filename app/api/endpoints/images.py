@@ -274,30 +274,6 @@ async def search_products(
         # Log the number of products returned from search
         logger.info(f"search_similar_products returned {len(similar_products)} products")
         
-        # Ensure we have the expected number of results
-        # if len(similar_products) < settings.MAX_SIMILAR_PRODUCTS:
-        #     logger.warning(f"Only found {len(similar_products)} products, adding dummy products to meet minimum")
-            
-        #     # Create dummy products to fill in the gaps
-        #     while len(similar_products) < settings.MAX_SIMILAR_PRODUCTS:
-        #         # Use the first product as a template if available
-        #         if similar_products:
-        #             template = similar_products[0].copy()
-        #             template["title"] = f"{template.get('title', 'Product')} (Similar Item {len(similar_products) + 1})"
-        #             template["source"] = "dummy"
-        #         else:
-        #             # Create a completely new dummy product
-        #             template = {
-        #                 "title": f"Sample Product {len(similar_products) + 1}",
-        #                 "link": "https://example.com",
-        #                 "image_url": "https://via.placeholder.com/150",
-        #                 "price": "$99.99",
-        #                 "brand": "Sample Brand",
-        #                 "source": "dummy"
-        #             }
-                
-        #         similar_products.append(template)
-        
         # Store search results in the database as a background task
         # This allows us to return the response to the user faster
         # while the database operations continue in the background
@@ -366,7 +342,8 @@ async def get_search_results(
     
     # Get all results for this search
     results_data = db_search.results
-    logger.info(f"Retrieved {len(results_data)} results for search ID: {search_id}")
+    sorted_results = sorted(results_data, key=lambda x: x.id)  # Sort by 'id' if needed
+    logger.info(f"Retrieved {len(sorted_results)} results for search ID: {search_id}")
     
     # Convert DB results to schema models
     results = [
@@ -383,7 +360,7 @@ async def get_search_results(
             rating=result.rating,
             reviews_count=result.reviews_count
         )
-        for result in results_data
+        for result in sorted_results
     ]
     
     return {
